@@ -207,6 +207,18 @@ REMOTE_AUTH_AUTO_CREATE_USER = True
 REMOTE_AUTH_DEFAULT_GROUPS = []
 REMOTE_AUTH_DEFAULT_PERMISSIONS = {}
 
+# REST API authentication via an external OpenID Connect provider (e.g. Microsoft Entra ID). When enabled, API
+# clients may present a JWT access token as "Authorization: Bearer <token>". The token is validated against the
+# provider's signing keys and mapped to a NetBox user, whose object permissions govern API access. User
+# provisioning (auto-create, default groups/permissions, group sync) honors the REMOTE_AUTH_* settings above.
+REST_API_OIDC_ENABLED = False
+# REST_API_OIDC_ISSUER = 'https://login.microsoftonline.com/<tenant-id>/v2.0'
+# REST_API_OIDC_AUDIENCE = 'api://<application-id>'
+# REST_API_OIDC_JWKS_URI = None  # Optional; discovered from REST_API_OIDC_ISSUER when omitted
+# REST_API_OIDC_ALGORITHMS = ['RS256']
+# REST_API_OIDC_USERNAME_CLAIM = 'preferred_username'
+# REST_API_OIDC_GROUPS_CLAIM = 'groups'
+
 # This repository is used to check whether there is a new release of NetBox available. Set to None to disable the
 # version check or use the URL below to check for release in the official NetBox repository.
 RELEASE_CHECK_URL = None

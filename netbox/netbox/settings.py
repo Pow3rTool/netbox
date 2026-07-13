@@ -183,6 +183,21 @@ REMOTE_AUTH_SUPERUSERS = getattr(configuration, 'REMOTE_AUTH_SUPERUSERS', [])
 REMOTE_AUTH_USER_EMAIL = getattr(configuration, 'REMOTE_AUTH_USER_EMAIL', 'HTTP_REMOTE_USER_EMAIL')
 REMOTE_AUTH_USER_FIRST_NAME = getattr(configuration, 'REMOTE_AUTH_USER_FIRST_NAME', 'HTTP_REMOTE_USER_FIRST_NAME')
 REMOTE_AUTH_USER_LAST_NAME = getattr(configuration, 'REMOTE_AUTH_USER_LAST_NAME', 'HTTP_REMOTE_USER_LAST_NAME')
+# REST API authentication via an external OpenID Connect provider (e.g. Microsoft Entra ID)
+REST_API_OIDC_ENABLED = getattr(configuration, 'REST_API_OIDC_ENABLED', False)
+REST_API_OIDC_ISSUER = getattr(configuration, 'REST_API_OIDC_ISSUER', None)
+REST_API_OIDC_AUDIENCE = getattr(configuration, 'REST_API_OIDC_AUDIENCE', None)
+REST_API_OIDC_JWKS_URI = getattr(configuration, 'REST_API_OIDC_JWKS_URI', None)
+REST_API_OIDC_ALGORITHMS = getattr(configuration, 'REST_API_OIDC_ALGORITHMS', ['RS256'])
+REST_API_OIDC_USERNAME_CLAIM = getattr(configuration, 'REST_API_OIDC_USERNAME_CLAIM', 'preferred_username')
+REST_API_OIDC_GROUPS_CLAIM = getattr(configuration, 'REST_API_OIDC_GROUPS_CLAIM', 'groups')
+if REST_API_OIDC_ENABLED:
+    if not REST_API_OIDC_AUDIENCE:
+        raise ImproperlyConfigured("REST_API_OIDC_ENABLED requires REST_API_OIDC_AUDIENCE to be set.")
+    if not (REST_API_OIDC_ISSUER or REST_API_OIDC_JWKS_URI):
+        raise ImproperlyConfigured(
+            "REST_API_OIDC_ENABLED requires either REST_API_OIDC_ISSUER or REST_API_OIDC_JWKS_URI to be set."
+        )
 # Required by extras/migrations/0109_script_models.py
 REPORTS_ROOT = getattr(configuration, 'REPORTS_ROOT', os.path.join(NETBOX_ROOT, 'reports')).rstrip('/')
 RQ = getattr(configuration, 'RQ', {})
@@ -812,6 +827,15 @@ REST_FRAMEWORK = {
     },
     'VIEW_NAME_FUNCTION': 'utilities.api.get_view_name',
 }
+
+# When OIDC bearer-token authentication is enabled, insert it ahead of TokenAuthentication so that JWT
+# bearer tokens are handled by that scheme. Native NetBox tokens (also sent as "Bearer") are ignored by
+# OIDCBearerAuthentication and fall through to TokenAuthentication.
+if REST_API_OIDC_ENABLED:
+    REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES'] = (
+        'netbox.api.authentication.OIDCBearerAuthentication',
+        *REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES'],
+    )
 
 #
 # DRF Spectacular

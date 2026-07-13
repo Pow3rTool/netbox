@@ -168,6 +168,7 @@ nav:
             - Google: 'administration/authentication/google.md'
             - Microsoft Entra ID: 'administration/authentication/microsoft-entra-id.md'
             - Okta: 'administration/authentication/okta.md'
+            - REST API (OIDC): 'administration/authentication/rest-api-oidc.md'
         - Permissions: 'administration/permissions.md'
         - Error Reporting: 'administration/error-reporting.md'
         - Management Commands: 'administration/management-commands.md'

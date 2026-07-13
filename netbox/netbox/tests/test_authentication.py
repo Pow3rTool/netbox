@@ -3,11 +3,13 @@ import sys
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+import jwt
 from django.conf import settings
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.test import Client, RequestFactory, SimpleTestCase
 from django.test.utils import override_settings
 from django.urls import reverse
+from rest_framework import exceptions
 from rest_framework.test import APIClient
 from social_core.exceptions import AuthFailed
 
@@ -15,6 +17,8 @@ from core.choices import ManagedFileRootPathChoices
 from core.models import ManagedFile, ObjectType
 from dcim.models import Rack, Site
 from extras.models import ScriptModule
+from netbox.api.authentication import OIDCBearerAuthentication
+from netbox.api.oidc import OIDCToken
 from netbox.authentication import LDAPBackend
 from netbox.authentication.misc import _mirror_groups
 from netbox.middleware import SocialAuthExceptionMiddleware
@@ -886,3 +890,94 @@ class SocialAuthExceptionMiddlewareTestCase(SimpleTestCase):
         self.assertEqual(response.url, settings.LOGIN_URL)
         messages = [str(m) for m in request._messages]
         self.assertEqual(messages, [self.GENERIC_MESSAGE])
+
+
+class OIDCBearerAuthenticationTestCase(TestCase):
+    """
+    Tests for OIDCBearerAuthentication. JWKS retrieval and JWT signature verification live in
+    netbox.api.oidc.validate_jwt, which is patched here so these tests can focus on the
+    authentication class's request handling, "Bearer" disambiguation, and user resolution.
+    """
+    @staticmethod
+    def _make_jwt(claims):
+        # Produce a syntactically valid JWT so get_unverified_header() succeeds. The signature is not
+        # verified in these tests because validate_jwt() is patched to return controlled claims.
+        return jwt.encode(claims, 'unit-test-secret', algorithm='HS256')
+
+    def _authenticate(self, header):
+        request = RequestFactory().get('/api/dcim/sites/', HTTP_AUTHORIZATION=header)
+        return OIDCBearerAuthentication().authenticate(request)
+
+    @override_settings(REST_API_OIDC_ENABLED=False)
+    def test_disabled_returns_none(self):
+        # When the feature is disabled, a JWT bearer token must be ignored (returns None).
+        token = self._make_jwt({'preferred_username': 'alice'})
+        self.assertIsNone(self._authenticate(f'Bearer {token}'))
+
+    @override_settings(
+        REST_API_OIDC_ENABLED=True,
+        REST_API_OIDC_AUDIENCE='api://netbox',
+        REMOTE_AUTH_AUTO_CREATE_USER=True,
+    )
+    def test_valid_token_resolves_and_provisions_user(self):
+        claims = {'preferred_username': 'alice@example.com', 'sub': 'abc-123'}
+        token = self._make_jwt(claims)
+        with patch('netbox.api.oidc.validate_jwt', return_value=claims):
+            result = self._authenticate(f'Bearer {token}')
+
+        self.assertIsNotNone(result)
+        user, auth = result
+        self.assertEqual(user.username, 'alice@example.com')
+        self.assertIsInstance(auth, OIDCToken)
+        self.assertTrue(User.objects.filter(username='alice@example.com').exists())
+
+    @override_settings(REST_API_OIDC_ENABLED=True, REST_API_OIDC_AUDIENCE='api://netbox')
+    def test_native_token_falls_through(self):
+        # A native NetBox v2 token uses the Bearer keyword but is not a JWT; authenticate() must return
+        # None so DRF falls through to TokenAuthentication.
+        header = f'Bearer {TOKEN_PREFIX}abcdefghijkl.0123456789abcdef'
+        self.assertIsNone(self._authenticate(header))
+
+    @override_settings(REST_API_OIDC_ENABLED=True, REST_API_OIDC_AUDIENCE='api://netbox')
+    def test_non_bearer_scheme_ignored(self):
+        # The "Token" keyword belongs to TokenAuthentication; ignore it here.
+        token = self._make_jwt({'preferred_username': 'alice'})
+        self.assertIsNone(self._authenticate(f'Token {token}'))
+
+    @override_settings(
+        REST_API_OIDC_ENABLED=True,
+        REST_API_OIDC_AUDIENCE='api://netbox',
+        REMOTE_AUTH_AUTO_CREATE_USER=True,
+    )
+    def test_invalid_jwt_raises(self):
+        # A well-formed JWT that fails validation is owned by this scheme and must raise (not fall through).
+        token = self._make_jwt({'preferred_username': 'alice'})
+        with patch('netbox.api.oidc.validate_jwt', side_effect=exceptions.AuthenticationFailed('bad token')):
+            with self.assertRaises(exceptions.AuthenticationFailed):
+                self._authenticate(f'Bearer {token}')
+
+    @override_settings(
+        REST_API_OIDC_ENABLED=True,
+        REST_API_OIDC_AUDIENCE='api://netbox',
+        REMOTE_AUTH_AUTO_CREATE_USER=False,
+    )
+    def test_unknown_user_without_autocreate_raises(self):
+        # With auto-creation disabled and no matching local user, authentication must fail.
+        claims = {'preferred_username': 'nobody@example.com'}
+        token = self._make_jwt(claims)
+        with patch('netbox.api.oidc.validate_jwt', return_value=claims):
+            with self.assertRaises(exceptions.AuthenticationFailed):
+                self._authenticate(f'Bearer {token}')
+
+    @override_settings(
+        REST_API_OIDC_ENABLED=True,
+        REST_API_OIDC_AUDIENCE='api://netbox',
+        REMOTE_AUTH_AUTO_CREATE_USER=True,
+        REST_API_OIDC_USERNAME_CLAIM='preferred_username',
+    )
+    def test_missing_username_claim_raises(self):
+        claims = {'sub': 'abc-123'}  # No preferred_username
+        token = self._make_jwt(claims)
+        with patch('netbox.api.oidc.validate_jwt', return_value=claims):
+            with self.assertRaises(exceptions.AuthenticationFailed):
+                self._authenticate(f'Bearer {token}')

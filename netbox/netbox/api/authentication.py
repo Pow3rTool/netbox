@@ -7,6 +7,7 @@ from rest_framework import exceptions
 from rest_framework.authentication import BaseAuthentication, get_authorization_header
 from rest_framework.permissions import SAFE_METHODS, BasePermission, DjangoObjectPermissions
 
+from netbox.api.oidc import OIDCToken
 from netbox.config import get_config
 from users.constants import TOKEN_PREFIX
 from users.models import Token
@@ -122,6 +123,57 @@ class TokenAuthentication(BaseAuthentication):
         return user, token
 
 
+class OIDCBearerAuthentication(BaseAuthentication):
+    """
+    Authenticate REST API requests using a JWT access token issued by an external OpenID Connect
+    provider (e.g. Microsoft Entra ID). The token is validated against the provider's published
+    signing keys and mapped to a NetBox user, whose object permissions then govern API access —
+    exactly as for a session- or token-authenticated user.
+
+    Enabled via REST_API_OIDC_ENABLED. This scheme coexists with TokenAuthentication: because both
+    use the "Bearer" keyword, any Authorization value that is not a well-formed JWT (i.e. a native
+    NetBox token) is ignored here and left for TokenAuthentication to handle.
+    """
+    keyword = V2_KEYWORD  # 'Bearer'
+
+    def authenticate(self, request):
+        # Feature disabled; ignore. (Also allows the class to be registered unconditionally in tests.)
+        if not settings.REST_API_OIDC_ENABLED:
+            return None
+
+        # Authorization header is not present or does not use the Bearer keyword; ignore
+        if not (auth := get_authorization_header(request).split()):
+            return None
+        if auth[0].lower() != self.keyword.lower().encode():
+            return None
+        if len(auth) != 2:
+            return None
+        try:
+            token_str = auth[1].decode()
+        except UnicodeError:
+            return None
+
+        # A native NetBox v2 token also uses the "Bearer" keyword. Distinguish a JWT by attempting to
+        # read its (unverified) header; anything that is not a well-formed JWT is left for
+        # TokenAuthentication to handle by returning None (which lets DRF fall through).
+        import jwt
+        try:
+            jwt.get_unverified_header(token_str)
+        except jwt.PyJWTError:
+            return None
+
+        # Validate the token and resolve the associated user. Failures here raise AuthenticationFailed
+        # (the token was a JWT and is therefore owned by this scheme).
+        from netbox.api.oidc import resolve_user, validate_jwt
+        claims = validate_jwt(token_str)
+        user = resolve_user(request, claims)
+
+        return user, OIDCToken(claims)
+
+    def authenticate_header(self, request):
+        return self.keyword
+
+
 class TokenPermissions(DjangoObjectPermissions):
     """
     Custom permissions handler which extends the built-in DjangoModelPermissions to validate a Token's write ability
@@ -176,11 +228,15 @@ class TokenWritePermission(BasePermission):
     """
 
     def has_permission(self, request, view):
-        if not isinstance(request.auth, Token):
-            raise exceptions.PermissionDenied(
-                "TokenWritePermission requires token authentication."
-            )
-        return bool(request.method in SAFE_METHODS or request.auth.write_enabled)
+        if isinstance(request.auth, Token):
+            return bool(request.method in SAFE_METHODS or request.auth.write_enabled)
+        # OIDC-authenticated requests carry no token-level write flag; write capability is enforced
+        # via the user's object permissions instead, so permit the request to proceed here.
+        if isinstance(request.auth, OIDCToken):
+            return True
+        raise exceptions.PermissionDenied(
+            "TokenWritePermission requires token authentication."
+        )
 
 
 class IsAuthenticatedOrLoginNotRequired(BasePermission):
@@ -204,4 +260,21 @@ class TokenScheme(OpenApiAuthenticationExtension):
             'in': 'header',
             'name': 'Authorization',
             'description': '`Token <token>` (v1) or `Bearer <key>.<token>` (v2)',
+        }
+
+
+class OIDCScheme(OpenApiAuthenticationExtension):
+    target_class = 'netbox.api.authentication.OIDCBearerAuthentication'
+    name = 'oidcAuth'
+    match_subclasses = True
+
+    def get_security_definition(self, auto_schema):
+        return {
+            'type': 'http',
+            'scheme': 'bearer',
+            'bearerFormat': 'JWT',
+            'description': (
+                'A JWT access token issued by an external OpenID Connect provider (e.g. Microsoft '
+                'Entra ID), passed as `Bearer <access_token>`. Requires REST_API_OIDC_ENABLED.'
+            ),
         }
